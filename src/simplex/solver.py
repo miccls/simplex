@@ -1,127 +1,153 @@
-from simplex import lp_problem, math
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+from typing import Iterable, Optional, Tuple, List
+
 import numpy as np
-# The outline for the simplex method.
-# Given a problem in standard form, A, b, c
-#
-# min c^T x
-#
-# s.t
-#   Ax = b
-#   x >= 0
-#
-# Step 1: Find a feasible starting point.
-#   Substep 1: ...
-# Step 2: Take the feasible starting point and use the simplex method to solve it the problem
-#
-#
-# For an iteration of the simplex algorithm, the following is inserted:
-# B     - A vector of indices for the current solutions in the basis
-# B_inv - The inverse of the basis matrix corresponding to B.
-# x     - The associated basic feasible solution.
 
-def compute_reduced_costs(problem, basic_variables, non_basic_variables, Binv):
-    c = problem.objective
-    A = problem.constraint_matrix
-    return c[non_basic_variables] - (c[basic_variables] @ Binv) @ A[:, non_basic_variables]
+from simplex import lp_problem, math, pivoting_strategy
 
 
+def compute_reduced_costs(
+    problem: lp_problem.LpProblem,
+    basic_variables: list[int],
+    non_basic_variables: list[int],
+    Binv: np.ndarray,
+) -> np.ndarray:
+    c: np.ndarray = problem.objective
+    A: np.ndarray = problem.constraint_matrix
+    return (
+        c[non_basic_variables]
+        - (c[basic_variables] @ Binv) @ A[:, non_basic_variables]
+    )
 
+
+class SolverStatus(Enum):
+    SUCCESS = 0
+    INFEASIBLE = 1
+    UBOUNDED = 2
+
+def compute_entering_variable_value(x: np.ndarray, u: np.ndarray) -> Tuple[int, float]:
+    return min(((i, xi / ui) for i, (xi, ui) in enumerate(zip(x, u)) if ui > 0), key=lambda pair: pair[1])
+
+# TODO: Add cycling detection, cycle proof pivoting strategy. Incorporate "pick_exiting_index" in pivot_strategy.
+@dataclass
 class Solver:
-    
-    def __init__(self, pivoting_strategy):
-        self.pivoting_strategy_ = pivoting_strategy
+    pivoting_strategy_: pivoting_strategy.PivotingStrategy
 
-    def find_basic_feasible_solution(self, problem):
-        # Finds a basic feasible solution by solving a separate LP
-        # min y
-        # s.t
-        # Ax + y = b
-        # x, y >= 0
-        # This can be started with B = I
-        # And the y's as basic variables.
-        # The solution will be a feasible starting point if the objective is 0,
-        # otherwise we conclude the LP is infeasible.
-        
-        b = problem.rhs.copy()
-        A = problem.constraint_matrix.copy()
+    def find_basic_feasible_solution(
+        self,
+        problem: lp_problem.LpProblem,
+    ) -> Tuple[SolverStatus, Optional[list[int]]]:
+        """
+        Finds a basic feasible solution by solving an auxiliary LP.
+        """
+
+        b: np.ndarray = problem.rhs.copy()
+        A_original: np.ndarray = problem.constraint_matrix.copy()
 
         for i in range(len(b)):
             if b[i] < 0:
-                A[i] *= -1 
-                b[i] *= -1 # Make rhs positive s.t y = b is valid initialization.
-        A = np.concatenate((problem.constraint_matrix, np.eye(len(b))), axis = 1) # Add artificial variables.
-        
-        c = np.concatenate((np.zeros(len(problem.objective)), np.ones(len(b))))
-        feasibility_problem = lp_problem.LpProblem(A, b, c)
-        B = [i for i in range(len(problem.objective), len(c))]
-        (success, (basis, _, _)) = self.solve(feasibility_problem, B = B, log = False)
-        
-        if not success:
-            # Should not happen
-            raise Exception("Could not solve auxiliary problem to find feasible starting point.")
-        
-        return basis
-         
+                A_original[i] *= -1
+                b[i] *= -1
 
-    def solve(self, problem: lp_problem.LpProblem, B = None, log = False):
+        A: np.ndarray = np.concatenate((A_original, np.eye(len(b))), axis=1)
+        c: np.ndarray = np.concatenate((np.zeros(len(problem.objective)), np.ones(len(b))))
         
+        feasibility_problem = lp_problem.LpProblem(A, b, c)
+
+        B: list[int] = list(range(len(problem.objective), len(c)))
+        success, (_, _, objective_value) = self.solve(feasibility_problem, B=B, log=False)
+
+        if success != SolverStatus.SUCCESS:
+            raise RuntimeError(
+                "Could not solve auxiliary problem to find feasible starting point."
+            )
+
+        if objective_value != 0:
+            return SolverStatus.INFEASIBLE, None
+        return SolverStatus.SUCCESS, B
+
+    def solve(
+        self,
+        problem: lp_problem.LpProblem,
+        B: Optional[list[int]] = None,
+        log: bool = False,
+    ) -> Tuple[
+        SolverStatus,
+        Tuple[
+            Optional[list[int]],
+            Optional[list[float]],
+            Optional[float],
+        ],
+    ]:
         if B is None:
-            B = self.find_basic_feasible_solution(problem)
-        
-        A = problem.constraint_matrix
-        c = problem.objective
-        
-        Binv = np.linalg.inv(A[:, B])
-        x = Binv @ problem.rhs
-        
-        terminate = False
-        success = False # Make enum: success, unbounded, infeasible.
-        
-        iteration = 1
-        
+            status, B = self.find_basic_feasible_solution(problem)
+            if status == SolverStatus.INFEASIBLE:
+                return status, (None, None, None)
+
+        assert B is not None  # for type checkers
+
+        A: np.ndarray = problem.constraint_matrix
+        c: np.ndarray = problem.objective
+        Binv: np.ndarray = np.linalg.inv(A[:, B])
+        x: np.ndarray = Binv @ problem.rhs
+
         if log:
-            print("Starting simplex algoritm...")
-        while not terminate:
-            non_basic_variables = [column for column in range(problem.variables) if column not in B]
- 
-            # Compute the reduced costs
-            reduced_costs = compute_reduced_costs(problem, B, non_basic_variables, Binv)
-    
-            # Check optimality
-            if all(reduced_costs >= 0):
-                terminate = True
-                success = True
-                continue
+            print("Starting simplex algorithm...")
+
+        iteration: int = 1
+        while True:
+            non_basic_variables: list[int] = [
+                col for col in range(problem.variables) if col not in B
+            ]
+
+            reduced_costs = compute_reduced_costs(
+                problem,
+                B,
+                non_basic_variables,
+                Binv,
+            )
+
+            if np.all(reduced_costs >= 0):
+                status = SolverStatus.SUCCESS
+                break
+
+            entering_index: int = non_basic_variables[self.pivoting_strategy_.pick_entering_index(reduced_costs)]
+            u: np.ndarray = Binv @ A[:, entering_index]
             
-            # Choose one of the variables with negative reduced cost according to some (lexicographical) pivoting strategy
-            within_base_index = self.pivoting_strategy_.pick_entering_index(reduced_costs)
-            entering_index = non_basic_variables[within_base_index]
-    
-            # Compute change in basic vars from change in var corresponding to entering index
-            u = Binv @ A[:, entering_index]
-            
-            # Check if problem is unbounded:
-            if all(u <= 0):
-                terminate = True
-                continue # unbounded, optimal cost is -inf
-            
-            # Some component is positive, that means we can reduce objective!
-            theta = min([(i,xi / ui) for i, (xi, ui) in enumerate(zip(x, u)) if ui > 0], key = lambda pair: pair[1])
-            
-            # Update the state accordingly
-            exiting_index = B[theta[0]] 
-            B[theta[0]] = entering_index
-            Binv = math.update_inverse(Binv, u, theta[0])
-            x -= theta[1] * u
-            x[theta[0]] = theta[1]
-            
-            # Log iteration.
+            if np.all(u <= 0):
+                status = SolverStatus.UBOUNDED
+                break
+
+            theta_index, theta_value = compute_entering_variable_value(x, u)
+            exiting_index: int = B[theta_index]
+            B[theta_index] = entering_index
+            Binv = math.update_inverse(Binv, u, theta_index)
+
+            x -= theta_value * u
+            x[theta_index] = theta_value
+
             if log:
-                print(f"Iteration {iteration} ::: Leaving index: {exiting_index}, Entering index: {entering_index}, Objective: {c[B] @ x}")
+                print(
+                    f"Iteration {iteration} ::: "
+                    f"Leaving index: {exiting_index}, "
+                    f"Entering index: {entering_index}, "
+                    f"Objective: {c[B] @ x}"
+                )
+                
             iteration += 1
+
         if log:
             print(f"Simplex algorithm terminated after {iteration} iterations.")
-        
-        solution = [x[B.index(i)] if i in B else 0 for i in range(problem.variables)]
-        return (success, (B, solution, c[B] @ x))
-    
+
+        if status == SolverStatus.SUCCESS:
+            solution: list[float] = [
+                float(x[B.index(i)]) if i in B else 0.0
+                for i in range(problem.variables)
+            ]
+            objective_value: float = float(c[B] @ x)
+            return status, (B, solution, objective_value)
+
+        return status, (None, None, None)
