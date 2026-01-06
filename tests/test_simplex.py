@@ -76,5 +76,28 @@ class TestSolver(unittest.TestCase):
         self.assertTrue(np.allclose(solution, [4,4,4,0,0,0]))
         self.assertEqual(-136, objective_value)
 
+    def test_problem_without_start_solution(self):
+        # Example 3.5 in "Introduction to Linear Programming", page 101.    
+        A = np.array([
+            [1, 2, 2, 1, 0, 0],
+            [2, 1, 2, 0, 1, 0],
+            [2, 2, 1, 0, 0, 1],
+        ])
+        
+        b = np.array([20, 20, 20]).T
+        
+        c = np.array([-10, -12, -12, 0, 0, 0])
+        
+        simplex_solver = solver.Solver(pivoting_strategy.SmallestSubscriptRule())
+        
+        test_problem = lp_problem.LpProblem(A, b, c)
+        (success, (basis, solution, objective_value)) = simplex_solver.solve(test_problem)
+        
+        # Check we have solved the problem correctly!
+        self.assertTrue(success)
+        self.assertTrue(all(i in [0,1,2] for i in basis))
+        self.assertTrue(np.allclose(solution, [4,4,4,0,0,0]))
+        self.assertAlmostEqual(-136, objective_value)
+
 if __name__ == "__main__":
     unittest.main()
