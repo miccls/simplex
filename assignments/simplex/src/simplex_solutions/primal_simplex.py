@@ -152,11 +152,8 @@ class PrimalSimplex:
         non_basic_vars: jaxtyping.Int[ArrayI, " num_nonbasic"],
         inv_basis_matrix: jaxtyping.Float[ArrayF, "m m"],
     ) -> jaxtyping.Float[ArrayF, " num_nonbasic"]:
-        n_matrix = problem.constraint_matrix[:, non_basic_vars]
-
-        return problem.objective[non_basic_vars] - n_matrix.T @ (
-            inv_basis_matrix.T @ problem.objective[basis]
-        )
+        lambda_t = inv_basis_matrix.T @ problem.objective[basis]
+        return problem.objective[non_basic_vars] - problem.constraint_matrix[:, non_basic_vars].T @ lambda_t
 
     def _finalize_result(
         self,
@@ -190,6 +187,7 @@ class PrimalSimplex:
                 raise InfeasibleLpError(
                     f"Failed to find an initial simplex basis: {e}"
                 ) from e
+        non_basic_vars = get_non_basic_vars(problem.num_variables, basis)
 
         inv_basis_matrix = np.linalg.inv(problem.constraint_matrix[:, basis])
         self.pivoting_strategy_.initialize(problem, basis)
@@ -205,8 +203,8 @@ class PrimalSimplex:
 
         logger.info("Iter     Objective      Primal Inf.    Dual Inf.    Time")
         start = time.time()
+
         for iteration in range(1, max_iterations):
-            non_basic_vars = get_non_basic_vars(problem.num_variables, basis)
 
             # Step 1: Compute reduced costs
             reduced_costs = self._compute_reduced_costs(
@@ -219,9 +217,10 @@ class PrimalSimplex:
                 return self._finalize_result(problem, basis, x_basis)
 
             # Step 2: Determine the entering variable
-            entering_variable: int = self.pivoting_strategy_.pick_entering_index(
+            entering_index: int = self.pivoting_strategy_.pick_entering_index(
                 reduced_costs, non_basic_vars
             )
+            entering_variable = non_basic_vars[entering_index]
 
             # d is the "basic direction" of the entering variable
             d = inv_basis_matrix @ problem.constraint_matrix[:, entering_variable]
@@ -235,6 +234,7 @@ class PrimalSimplex:
             )
 
             # Step 4: Update the inverse of the basis matrix
+            non_basic_vars[entering_index] = basis[basic_exiting_index]
             basis[basic_exiting_index] = entering_variable
 
             if iteration % INVERSE_RECOMPUTE_INTERVAL == 0:
@@ -253,11 +253,13 @@ class PrimalSimplex:
             x_basis[basic_exiting_index] = x_entering
 
             self.solve_history_.update(basis, float(problem.objective[basis] @ x_basis))
-            logger.info(
-                f"{iteration:4d}    {problem.objective[basis].T @ x_basis:10.3e}     "
-                f"{np.sum(np.abs(problem.constraint_matrix[:, basis] @ x_basis - problem.rhs)):10.3e}     {max(0.0, np.sum(problem.constraint_matrix.T @ (inv_basis_matrix @ problem.objective[basis]) - problem.objective)):10.3e}"
-                f"    {time.time() - start:.4}s"
-            )
+
+            if (iteration < 10) or (iteration % 100 == 0):
+                logger.info(
+                    f"{iteration:4d}    {problem.objective[basis].T @ x_basis:10.3e}     "
+                    f"{np.sum(np.abs(problem.constraint_matrix[:, basis] @ x_basis - problem.rhs)):10.3e}     {max(0.0, np.sum(problem.constraint_matrix.T @ (inv_basis_matrix @ problem.objective[basis]) - problem.objective)):10.3e}"
+                    f"    {time.time() - start:.4}s"
+                )
 
         logger.info(
             f"Simplex algorithm terminated due to {max_iterations} iteration limit"

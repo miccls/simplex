@@ -8,6 +8,8 @@ from common.numpy_type_aliases import ArrayF, ArrayI
 
 from simplex import linear_algebra, pivoting_strategy
 from simplex_util import (
+    INVERSE_RECOMPUTE_INTERVAL,
+    NON_NEGATIVITY_TOLERANCE,
     OPTIMALITY_TOL,
     InfeasibleLpError,
     IterationLimitError,
@@ -15,9 +17,12 @@ from simplex_util import (
     SolveHistory,
     SolveResult,
     UnboundedLpError,
+    get_non_basic_vars,
 )
 
 logger = logging.getLogger(__name__)
+LOG_FIRST_ITERATIONS = 10
+LOG_INTERVAL = 100
 
 
 def is_linearly_independent(
@@ -96,7 +101,8 @@ class PrimalSimplex:
             objective=phase_one_objective,
         )
 
-        phase_one_solver = PrimalSimplex(pivot_strategy=pivoting_strategy.BlandsRule())
+        # TODO(you): Choose an appropriate pivoting strategy for the Phase 1 problem.
+        phase_one_solver = PrimalSimplex(pivot_strategy=self.pivoting_strategy_)
         phase_one_result = phase_one_solver.solve(
             phase_one_problem,
             # TODO(you): What is valid starting basis for the Phase 1 problem?
@@ -114,7 +120,7 @@ class PrimalSimplex:
         )
 
         # TODO(you): The final basis could contain some of the auxiliary variables introduced in Phase 1.
-        # Use purge_aux_vars to handle this.
+        # Use purge_aux_vars to handle this and fail if auxiliary variables remain.
         basis = purge_aux_vars(
             phase_one_problem, phase_one_result.basis, problem.num_variables
         )
@@ -162,10 +168,12 @@ class PrimalSimplex:
                 basis = self.find_initial_basis(problem, max_iterations=max_iterations)
             except SolveFailedError as e:
                 raise InfeasibleLpError(
-                    "Failed to find an initial simplex basis"
+                    f"Failed to find an initial simplex basis: {e}"
                 ) from e
+        non_basic_vars = get_non_basic_vars(problem.num_variables, basis)
 
         inv_basis_matrix = np.linalg.inv(problem.constraint_matrix[:, basis])
+        self.pivoting_strategy_.initialize(problem, basis)
 
         # x_basis is the values of the basic variables
         # TODO(you): set the correct values for x_basis here
@@ -180,58 +188,62 @@ class PrimalSimplex:
         logger.info("Iter     Objective      Primal Inf.    Dual Inf.    Time")
         start = time.time()
         for iteration in range(1, max_iterations):
-            non_basic_vars = np.array(
-                [i for i in range(problem.num_variables) if i not in set(basis)]
-            )
-
             # Step 1: Compute reduced costs
             # TODO(you): set to the correct reduced costs
             reduced_costs = self._compute_reduced_costs(
                 problem, basis, non_basic_vars, inv_basis_matrix
             )
-            if np.all(reduced_costs >= -pivoting_strategy.PIVOTING_TOLERANCE):
+            if np.all(reduced_costs >= -NON_NEGATIVITY_TOLERANCE):
                 logger.info(
                     f"Simplex algorithm found optimal objective {self.solve_history_.objective_history[-1]} after {iteration - 1} iterations."
                 )
                 return self._finalize_result(problem, basis, x_basis)
 
             # Step 2: Determine the entering variable
-            entering_variable: int = self.pivoting_strategy_.pick_entering_index(
+            entering_index: int = self.pivoting_strategy_.pick_entering_index(
                 reduced_costs, non_basic_vars
             )
+            # TODO(you): Convert the selected non-basic index into the entering variable.
+            entering_variable = non_basic_vars[entering_index]
 
             # d is the "basic direction" of the entering variable
             d = inv_basis_matrix @ problem.constraint_matrix[:, entering_variable]
 
-            if np.all(d <= 0):
+            if np.all(d <= pivoting_strategy.PIVOTING_TOLERANCE):
                 raise UnboundedLpError
 
             # Step 3: Determine the exiting variable
             basic_exiting_index = self.pivoting_strategy_.pick_exiting_index(
-                basis, x_basis, d
+                basis, x_basis, d, inv_basis_matrix
             )
 
-            # Step 4: Update the inverse of the basis matrix (feel free to change input args to update_inverse if desirable)
+            # Step 4: Update the basis and inverse of the basis matrix
+            # TODO(you): Keep the non-basic variables aligned with the basis update.
+            non_basic_vars[entering_index] = basis[basic_exiting_index]
             basis[basic_exiting_index] = entering_variable
 
             # TODO(you): Update the inverse of the basis matrix using linear_algebra.update_inverse
-            inv_basis_matrix = linear_algebra.update_inverse(
-                problem.constraint_matrix,
-                inv_basis_matrix,
-                entering_variable,
-                basic_exiting_index,
-            )
+            if iteration % INVERSE_RECOMPUTE_INTERVAL == 0:
+                inv_basis_matrix = np.linalg.inv(problem.constraint_matrix[:, basis])
+            else:
+                inv_basis_matrix = linear_algebra.update_inverse(
+                    problem.constraint_matrix,
+                    inv_basis_matrix,
+                    entering_variable,
+                    basic_exiting_index,
+                )
 
             # Step 5: Update the basic solution from the basic direction
             # TODO(you): ...
             x_basis = np.zeros(len(basis))
 
             self.solve_history_.update(basis, float(problem.objective[basis] @ x_basis))
-            logger.info(
-                f"{iteration:4d}    {problem.objective[basis].T @ x_basis:10.3e}     "
-                f"{np.sum(np.abs(problem.constraint_matrix[:, basis] @ x_basis - problem.rhs)):10.3e}     {max(0.0, np.sum(problem.constraint_matrix.T @ (inv_basis_matrix @ problem.objective[basis]) - problem.objective)):10.3e}"
-                f"    {time.time() - start:.4}s"
-            )
+            if (iteration < LOG_FIRST_ITERATIONS) or (iteration % LOG_INTERVAL == 0):
+                logger.info(
+                    f"{iteration:4d}    {problem.objective[basis].T @ x_basis:10.3e}     "
+                    f"{np.sum(np.abs(problem.constraint_matrix[:, basis] @ x_basis - problem.rhs)):10.3e}     {max(0.0, np.sum(problem.constraint_matrix.T @ (inv_basis_matrix @ problem.objective[basis]) - problem.objective)):10.3e}"
+                    f"    {time.time() - start:.4}s"
+                )
 
         logger.info(
             f"Simplex algorithm terminated due to {max_iterations} iteration limit"

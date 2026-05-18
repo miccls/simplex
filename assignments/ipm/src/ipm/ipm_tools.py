@@ -4,6 +4,7 @@ import jaxtyping
 import numpy as np
 from common import lp_problem
 from common.numpy_type_aliases import ArrayF
+from scipy import sparse
 
 
 @dataclass(frozen=True)
@@ -52,7 +53,7 @@ def calculate_mu_after_step(
 
 
 def solve_ipm_system(
-    a: jaxtyping.Float[ArrayF, "m n"],
+    a: sparse.csr_array,
     point: PrimalDualTuple,
     r_c: jaxtyping.Float[ArrayF, " n"],
     r_b: jaxtyping.Float[ArrayF, " m"],
@@ -69,7 +70,7 @@ def solve_ipm_system(
     Output:
         Solution of system (14.41)
     """
-    # TODO(you): Solve the system (14.41)
+    # TODO(you): Solve the sparse normal-equation form of system (14.41)
     return PrimalDualTuple(
         x=np.zeros(a.shape[1]), lam=np.zeros(a.shape[0]), s=np.zeros(a.shape[1])
     )
@@ -92,10 +93,11 @@ def solve_newton_direction(
     """Solves the system (14.35) in Nocedal & Wright for the Newton direction"""
 
     # TODO(you): Compute the proper residuals used to solve for the Newton direction
+    a = lp_problem.sparse_constraint_matrix
     return PrimalDualTuple(
-        x=np.zeros(lp_problem.constraint_matrix.shape[1]),
-        lam=np.zeros(lp_problem.constraint_matrix.shape[0]),
-        s=np.zeros(lp_problem.constraint_matrix.shape[1]),
+        x=np.zeros(a.shape[1]),
+        lam=np.zeros(a.shape[0]),
+        s=np.zeros(a.shape[1]),
     )
 
 
@@ -119,8 +121,9 @@ def solve_predictor_corrector_direction(
     """Solves the system (14.35) in Nocedal & Wright for the predictor corrector direction"""
 
     # TODO(you): Compute the proper residuals used to solve for the Predictor Corrector direction
+    a = lp_problem.sparse_constraint_matrix
     return PrimalDualTuple(
-        x=np.zeros(lp_problem.constraint_matrix.shape[1]),
-        lam=np.zeros(lp_problem.constraint_matrix.shape[0]),
-        s=np.zeros(lp_problem.constraint_matrix.shape[1]),
+        x=np.zeros(a.shape[1]),
+        lam=np.zeros(a.shape[0]),
+        s=np.zeros(a.shape[1]),
     )

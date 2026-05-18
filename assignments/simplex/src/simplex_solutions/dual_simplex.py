@@ -161,6 +161,8 @@ class DualSimplex:
             is_augmented = problem.num_variables > original_num_variables
 
         basis = initial_basis
+        non_basic_vars = get_non_basic_vars(problem.num_variables, basis)
+
         inv_basis_matrix = np.linalg.inv(problem.constraint_matrix[:, basis])
         self.pivoting_strategy_.initialize(problem, basis)
 
@@ -176,8 +178,6 @@ class DualSimplex:
         start = time.time()
 
         for iteration in range(1, max_iterations):
-            non_basic_vars = get_non_basic_vars(problem.num_variables, basis)
-
             # Check for optimality
             if np.all(x_basis >= -NON_NEGATIVITY_TOLERANCE):
                 logger.info(
@@ -220,6 +220,7 @@ class DualSimplex:
             x_basis[exiting_index] = gamma
 
             # Update basis
+            non_basic_vars[entering_index] = basis[exiting_index]
             basis[exiting_index] = entering_variable
 
             # Update inverse
@@ -234,10 +235,12 @@ class DualSimplex:
                 )
 
             self.solve_history_.update(basis, float(problem.objective[basis] @ x_basis))
-            logger.info(
-                f"{iteration:4d}    {problem.objective[basis].T @ x_basis:10.3e}     "
-                f"{np.sum(np.abs(problem.constraint_matrix[:, basis] @ x_basis - problem.rhs)) - np.sum(np.minimum(x_basis, 0.0)):10.3e}     {abs(min(np.min(s_non_basic), 0.0)):10.3e}"
-                f"    {time.time() - start:.4}s"
-            )
+
+            if (iteration < 10) or (iteration % 100 == 0):
+                logger.info(
+                    f"{iteration:4d}    {problem.objective[basis].T @ x_basis:10.3e}     "
+                    f"{np.sum(np.abs(problem.constraint_matrix[:, basis] @ x_basis - problem.rhs)) - np.sum(np.minimum(x_basis, 0.0)):10.3e}     {abs(min(np.min(s_non_basic), 0.0)):10.3e}"
+                    f"    {time.time() - start:.4}s"
+                )
 
         raise simplex_util.IterationLimitError

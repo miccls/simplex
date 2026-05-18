@@ -134,7 +134,7 @@ def test_netlib_primal_simplex(
     iters = int(NETLIB_SOLUTIONS[name].get("simplex_iters", 1000))
 
     primal_simplex_solver = primal_simplex.PrimalSimplex(
-        pivot_strategy=pivoting_strategy.SteepestEdgeRule()
+        pivot_strategy=pivoting_strategy.DantzigsRule()
     )
     solution = primal_simplex_solver.solve(lp, max_iterations=iters)
 
@@ -152,7 +152,7 @@ def test_netlib_dual_simplex(
     iters = int(NETLIB_SOLUTIONS[name].get("simplex_iters", 1000))
 
     dual_simplex_solver = dual_simplex.DualSimplex(
-        pivot_strategy=pivoting_strategy.DualSteepestEdgeRule()
+        pivot_strategy=pivoting_strategy.DualDantzigsRule()
     )
     solution = dual_simplex_solver.solve(lp, max_iterations=iters)
 

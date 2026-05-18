@@ -1,17 +1,24 @@
 import logging
+import time
 
 import jaxtyping
 import numpy as np
+import scipy.linalg
 from common import lp_problem
 from common.numpy_type_aliases import ArrayF, ArrayI
 
-from simplex import pivoting_strategy
+import simplex_util
+from simplex import linear_algebra, pivoting_strategy
 from simplex_util import (
+    INVERSE_RECOMPUTE_INTERVAL,
+    NON_NEGATIVITY_TOLERANCE,
     SolveHistory,
-    SolveResult,
+    get_non_basic_vars,
 )
 
 logger = logging.getLogger(__name__)
+LOG_FIRST_ITERATIONS = 10
+LOG_INTERVAL = 100
 
 
 class DualSimplex:
@@ -35,7 +42,10 @@ class DualSimplex:
 
     def _setup_artificial_problem(
         self, problem: lp_problem.LpProblem, big_m: float = 1e6
-    ) -> tuple[lp_problem.LpProblem, jaxtyping.Int[ArrayI, " m+1"]]:
+    ) -> tuple[
+        lp_problem.LpProblem,
+        jaxtyping.Int[ArrayI, " m"],
+    ]:
         """
         Sets up the problem for a Phase 1 Dual Simplex by adding a single artificial constraint.
 
@@ -60,7 +70,9 @@ class DualSimplex:
         for the dual simplex method.
         """
         # TODO(you): Implement the setup for the artificial problem to find a dual-feasible basis.
+        # Use a rank-revealing QR factorization to find an initial independent basis.
         m, _ = problem.constraint_matrix.shape
+        scipy.linalg.qr(problem.constraint_matrix, pivoting=True)
         return problem, np.zeros(m, dtype=int)
 
     def _finalize_result(
@@ -70,7 +82,7 @@ class DualSimplex:
         x_basis: jaxtyping.Float[ArrayF, " m"],
         is_augmented: bool = False,
         original_num_variables: int = 0,
-    ) -> SolveResult:
+    ) -> simplex_util.SolveResult:
         solution = np.zeros(problem.num_variables)
         solution[basis] = x_basis
 
@@ -78,7 +90,7 @@ class DualSimplex:
 
         # TODO(you): Handle the augmented problem case if necessary.
 
-        return SolveResult(
+        return simplex_util.SolveResult(
             basis=final_basis,
             solution=solution,
             objective_value=self.solve_history_.objective_history[-1],
@@ -89,6 +101,87 @@ class DualSimplex:
         problem: lp_problem.LpProblem,
         max_iterations: int = 100,
         initial_basis: jaxtyping.Int[ArrayI, " m"] | None = None,
-    ) -> SolveResult:
-        # TODO(you): Implement the dual simplex algorithm.
-        return SolveResult(np.array([]), np.array([]), 0.0)
+    ) -> simplex_util.SolveResult:
+        self.solve_history_ = SolveHistory()
+
+        original_num_variables = problem.num_variables
+        is_augmented = False
+
+        if initial_basis is None:
+            problem, initial_basis = self._setup_artificial_problem(problem)
+            is_augmented = problem.num_variables > original_num_variables
+
+        basis = initial_basis
+        non_basic_vars = get_non_basic_vars(problem.num_variables, basis)
+
+        inv_basis_matrix = np.linalg.inv(problem.constraint_matrix[:, basis])
+        self.pivoting_strategy_.initialize(problem, basis)
+
+        # TODO(you): Compute the basic variable values.
+        x_basis = np.zeros(len(basis))
+
+        logger.info("Starting Dual Simplex algorithm...")
+        self.solve_history_.update(basis, float(problem.objective[basis] @ x_basis))
+        logger.info(
+            f"Initial objective value {self.solve_history_.objective_history[-1]}"
+        )
+
+        logger.info("Iter     Objective      Primal Inf.    Dual Inf.    Time")
+        start = time.time()
+
+        for iteration in range(1, max_iterations):
+            # TODO(you): Check for dual-simplex optimality.
+            if np.all(x_basis >= -NON_NEGATIVITY_TOLERANCE):
+                logger.info(
+                    f"Simplex algorithm found optimal objective {self.solve_history_.objective_history[-1]} after {iteration - 1} iterations."
+                )
+                return self._finalize_result(
+                    problem, basis, x_basis, is_augmented, original_num_variables
+                )
+
+            exiting_index = self.pivoting_strategy_.pick_exiting_index(
+                x_basis, basis, inv_basis_matrix
+            )
+
+            # TODO(you): Compute reduced costs and the dual pivot direction.
+            s_non_basic = np.zeros(len(non_basic_vars))
+            non_basic_direction = np.zeros(len(non_basic_vars))
+
+            if np.max(non_basic_direction) <= pivoting_strategy.PIVOTING_TOLERANCE:
+                raise simplex_util.InfeasibleLpError(
+                    "Dual problem is unbounded, therefore Primal is infeasible."
+                )
+
+            entering_index = self.pivoting_strategy_.pick_entering_index(
+                non_basic_vars, s_non_basic, non_basic_direction
+            )
+            entering_variable = non_basic_vars[entering_index]
+
+            # TODO(you): Update the basic solution from the dual-simplex direction.
+            x_basis = np.zeros(len(basis))
+
+            # TODO(you): Keep the non-basic variables aligned with the basis update.
+            non_basic_vars[entering_index] = basis[exiting_index]
+            basis[exiting_index] = entering_variable
+
+            # TODO(you): Update the inverse of the basis matrix.
+            if iteration % INVERSE_RECOMPUTE_INTERVAL == 0:
+                inv_basis_matrix = np.linalg.inv(problem.constraint_matrix[:, basis])
+            else:
+                inv_basis_matrix = linear_algebra.update_inverse(
+                    problem.constraint_matrix,
+                    inv_basis_matrix,
+                    int(entering_variable),
+                    int(exiting_index),
+                )
+
+            self.solve_history_.update(basis, float(problem.objective[basis] @ x_basis))
+
+            if (iteration < LOG_FIRST_ITERATIONS) or (iteration % LOG_INTERVAL == 0):
+                logger.info(
+                    f"{iteration:4d}    {problem.objective[basis].T @ x_basis:10.3e}     "
+                    f"{np.sum(np.abs(problem.constraint_matrix[:, basis] @ x_basis - problem.rhs)) - np.sum(np.minimum(x_basis, 0.0)):10.3e}     {abs(min(np.min(s_non_basic), 0.0)):10.3e}"
+                    f"    {time.time() - start:.4}s"
+                )
+
+        raise simplex_util.IterationLimitError

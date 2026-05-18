@@ -8,7 +8,7 @@ from common.numpy_type_aliases import ArrayF, ArrayI
 
 from simplex_util import get_non_basic_vars
 
-PIVOTING_TOLERANCE = 1e-4
+PIVOTING_TOLERANCE = 1e-5
 
 
 class PrimalPivotingStrategy(ABC):
@@ -139,7 +139,12 @@ class BlandsRule(PrimalPivotingStrategy):
         reduced_costs: jaxtyping.Float[ArrayF, " num_nonbasic"],
         non_basic_vars: jaxtyping.Int[ArrayI, " num_nonbasic"],
     ) -> int:
-        return int(non_basic_vars[reduced_costs < -PIVOTING_TOLERANCE].min())
+        candidate_indices = np.flatnonzero(reduced_costs < -PIVOTING_TOLERANCE)
+
+        if len(candidate_indices) == 0:
+            raise RuntimeError("No valid entering variable found.")
+
+        return int(candidate_indices[np.argmin(non_basic_vars[candidate_indices])])
 
     @override
     def pick_exiting_index(
@@ -169,7 +174,7 @@ class DantzigsRule(PrimalPivotingStrategy):
         non_basic_vars: jaxtyping.Int[ArrayI, " num_nonbasic"],
     ) -> int:
         # non_basic_vars are sorted in my implementation
-        return int(non_basic_vars[np.argmin(reduced_costs)])
+        return int(np.argmin(reduced_costs))
 
     @override
     def pick_exiting_index(
@@ -191,7 +196,7 @@ class SteepestEdgeRule(PrimalPivotingStrategy):
         initial_basis: jaxtyping.Int[ArrayI, " m"] | None = None,
     ) -> None:
         self.problem: LpProblem | None = None
-        self.entering_variable = -1
+        self.entering_index = -1
         self.non_basic_vars = np.array([], dtype=int)
         self.norm_eta_squared = np.array([], dtype=float)
 
@@ -205,14 +210,15 @@ class SteepestEdgeRule(PrimalPivotingStrategy):
         basis: jaxtyping.Int[ArrayI, " m"],
     ) -> None:
         self.problem = problem
-        self.entering_variable = -1
+        self.entering_index = -1
         self.non_basic_vars = get_non_basic_vars(problem.num_variables, basis)
-        self.iteration = 0
 
         b_inv = np.linalg.inv(problem.constraint_matrix[:, basis])
         basic_directions = b_inv @ problem.constraint_matrix[:, self.non_basic_vars]
+
         self.norm_eta_squared = 1.0 + np.sum(
-            basic_directions * basic_directions, axis=0
+            basic_directions * basic_directions,
+            axis=0,
         )
 
     def _update_eta(
@@ -225,41 +231,41 @@ class SteepestEdgeRule(PrimalPivotingStrategy):
         if self.problem is None:
             raise RuntimeError("SteepestEdgeRule must be initialized before use.")
 
-        entering_position = int(
-            np.flatnonzero(self.non_basic_vars == self.entering_variable)[0]
-        )
+        entering_index = self.entering_index
+
+        if entering_index < 0 or entering_index >= len(self.non_basic_vars):
+            raise RuntimeError("Entering index is invalid.")
+
+        non_basic_vars = self.non_basic_vars
+        gamma = self.norm_eta_squared
+
         exiting_variable = int(basis[exiting_index])
         pivot = float(basic_direction[exiting_index])
 
-        keep_mask = self.non_basic_vars != self.entering_variable
-        remaining_non_basic_vars = self.non_basic_vars[keep_mask]
-        remaining_gamma = self.norm_eta_squared[keep_mask]
+        if abs(pivot) <= PIVOTING_TOLERANCE:
+            raise RuntimeError("Pivot is too close to zero.")
 
-        remaining_directions = (
-            b_inv @ self.problem.constraint_matrix[:, remaining_non_basic_vars]
-        )
-        direction_dot_products = basic_direction @ remaining_directions
+        entering_gamma = float(gamma[entering_index])
 
-        # The steepest-edge recurrence is computed in the old basis. The
-        # exiting row gives d_j[p] for each old non-basic column, and gamma_q
-        # is the old squared norm of the entering edge direction.
-        alpha = remaining_directions[exiting_index, :] / pivot
-        entering_gamma = self.norm_eta_squared[entering_position]
-        updated_remaining_gamma = (
-            remaining_gamma
-            - 2.0 * alpha * direction_dot_products
-            + (alpha * alpha) * entering_gamma
-        )
+        # Compute all old non-basic directions needed for the recurrence,
+        # but avoid forming the full B_inv @ A_N matrix.
+        non_basic_columns = self.problem.constraint_matrix[:, non_basic_vars]
 
-        # After the pivot, the entering variable is basic and the exiting
-        # variable is non-basic. Its edge norm follows from B_new^-1 A_exit.
-        exiting_gamma = entering_gamma / (pivot * pivot)
-        updated_non_basic_vars = np.append(remaining_non_basic_vars, exiting_variable)
-        updated_gamma = np.append(updated_remaining_gamma, exiting_gamma)
+        alpha = (b_inv[exiting_index, :] @ non_basic_columns) / pivot
+        direction_dot_products = (basic_direction @ b_inv) @ non_basic_columns
 
-        order = np.argsort(updated_non_basic_vars)
-        self.non_basic_vars = updated_non_basic_vars[order]
-        self.norm_eta_squared = np.maximum(updated_gamma[order], PIVOTING_TOLERANCE)
+        # Steepest-edge recurrence, applied in the current non-basic ordering.
+        gamma -= 2.0 * alpha * direction_dot_products
+        gamma += alpha * alpha * entering_gamma
+
+        # The entering variable becomes basic. The exiting variable becomes
+        # non-basic and takes the same slot in non_basic_vars.
+        non_basic_vars[entering_index] = exiting_variable
+        gamma[entering_index] = entering_gamma / (pivot * pivot)
+
+        np.maximum(gamma, PIVOTING_TOLERANCE, out=gamma)
+
+        self.entering_index = -1
 
     @override
     def pick_entering_index(
@@ -272,13 +278,17 @@ class SteepestEdgeRule(PrimalPivotingStrategy):
                 "Steepest-edge weights are not aligned with non-basic variables."
             )
 
-        candidate_mask = reduced_costs < -PIVOTING_TOLERANCE
-        candidate_scores = np.full_like(reduced_costs, np.inf, dtype=float)
-        candidate_scores[candidate_mask] = reduced_costs[candidate_mask] / np.sqrt(
-            self.norm_eta_squared[candidate_mask]
+        candidate_indices = np.flatnonzero(reduced_costs < -PIVOTING_TOLERANCE)
+
+        if len(candidate_indices) == 0:
+            raise RuntimeError("No valid entering variable found.")
+
+        scores = reduced_costs[candidate_indices] / np.sqrt(
+            self.norm_eta_squared[candidate_indices]
         )
-        self.entering_variable = int(non_basic_vars[np.argmin(candidate_scores)])
-        return self.entering_variable
+
+        self.entering_index = int(candidate_indices[np.argmin(scores)])
+        return self.entering_index
 
     @override
     def pick_exiting_index(
@@ -294,9 +304,14 @@ class SteepestEdgeRule(PrimalPivotingStrategy):
             )
 
         exiting_index = index_of_smallest_ratio(basis, x_basis, basic_direction)
-        self._update_eta(exiting_index, basis, inv_basis_matrix, basic_direction)
-        return exiting_index
+        self._update_eta(
+            exiting_index=exiting_index,
+            basis=basis,
+            b_inv=inv_basis_matrix,
+            basic_direction=basic_direction,
+        )
 
+        return exiting_index
 
 class DualBlandsRule(DualPivotingStrategy):
     @override
